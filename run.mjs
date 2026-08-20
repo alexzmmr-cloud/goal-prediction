@@ -3,7 +3,7 @@ import { withStealthPage, withVisiblePage } from './browser-stealth.mjs';
 import { url as forebetTodayUrl, scrapeToday, filterByTotal } from './sites/forebet-today.mjs';
 import { createMatchWatch, pollMatch } from './scheduler.mjs';
 import { appendAlert } from './alert-log.mjs';
-import { createBot, sendAlert } from './telegram.mjs';
+import { createBot, sendAlert, sendStatus } from './telegram.mjs';
 import { mayHaveStarted } from './sites/forebet-kickoff.mjs';
 
 const POLL_INTERVAL_MS = 60_000; // см. Plan.md, шаг 3: разумный интервал 1-2 минуты
@@ -34,6 +34,8 @@ async function main() {
   const all = await scrapeTodayWithRetries();
   const filtered = filterByTotal(all, MIN_TOTAL);
   console.log(`Матчей всего: ${all.length}, с тоталом >= ${MIN_TOTAL}: ${filtered.length}`);
+
+  await sendStatus(bot, chatId, `▶️ Мониторинг запущен: ${filtered.length} матчей с тоталом >= ${MIN_TOTAL}.`);
 
   const watches = filtered.map(createMatchWatch);
 
@@ -77,9 +79,21 @@ async function main() {
   }
 
   console.log('Все матчи из списка отслежены (все контрольные точки пройдены).');
+  await sendStatus(bot, chatId, '✅ Мониторинг завершён: все матчи дня отслежены.');
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
   console.error(err);
+  // Пользователь не смотрит в терминал (закрытая крышка, внешний монитор) —
+  // тишина в Telegram не должна означать "всё ещё работает", если процесс
+  // на самом деле упал. Best-effort: если бот/chatId сами недоступны
+  // (например упали ещё до createBot), это сообщение тоже не дойдёт —
+  // тогда остаётся только консоль, это неизбежная граница.
+  try {
+    const bot = createBot();
+    await sendStatus(bot, process.env.TELEGRAM_CHAT_ID, `🛑 Мониторинг аварийно остановлен: ${err.message}`);
+  } catch {
+    // не смогли даже уведомить — см. комментарий выше
+  }
   process.exit(1);
 });
