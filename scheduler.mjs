@@ -2,15 +2,20 @@ import { withPage } from './browser.mjs';
 import { readCurrentMinute, readLiveStats } from './sites/forebet-live.mjs';
 import { evaluateAlert } from './alert-rule.mjs';
 
-// Контрольные точки: 15' только для 1-го тайма (см. Plan.md, 1.1/1.3),
-// остальные — 2-й тайм.
-export const CHECKPOINTS = [15, 50, 60, 70, 80];
+// Контрольные точки: 15'/25' — 1-й тайм (только при счёте 0:0, см. Plan.md, 1.1/1.3
+// и уточнение порогов в alert-rule.mjs), 50/60/70/80' — 2-й тайм.
+export const CHECKPOINTS = [15, 25, 50, 60, 70, 80];
+const FIRST_HALF_CHECKPOINTS = new Set([15, 25]);
 
-// 15' валидна только пока реально идёт 1-й тайм (см. Plan.md, 1.1/1.3) —
-// если планировщик впервые опрашивает матч уже позже (например, процесс был
-// запущен с опозданием), 15' нельзя честно проверить и её нужно пропустить,
+// Отсечки 1-го тайма валидны только пока реально идёт 1-й тайм — если
+// планировщик впервые опрашивает матч уже позже (например, процесс был
+// запущен с опозданием), их нельзя честно проверить и нужно пропустить,
 // а не засчитать с данными случайной поздней минуты.
 const FIRST_HALF_END = 45;
+
+function halfFor(checkpoint) {
+  return FIRST_HALF_CHECKPOINTS.has(checkpoint) ? 1 : 2;
+}
 
 // Состояние одного отслеживаемого матча.
 export function createMatchWatch(match) {
@@ -49,8 +54,8 @@ export async function pollMatch(watch, { onCheckpoint, onSkip } = {}) {
     if (minute === null) return null;
     if (minute < cp) return null; // отметка ещё не наступила
 
-    if (cp === 15 && minute > FIRST_HALF_END) {
-      // 1-й тайм уже точно закончился — 15' нельзя честно проверить.
+    if (FIRST_HALF_CHECKPOINTS.has(cp) && minute > FIRST_HALF_END) {
+      // 1-й тайм уже точно закончился — эту отметку нельзя честно проверить.
       watch.skippedCheckpoints.push(cp);
       if (onSkip) onSkip(watch, { checkpoint: cp, minute });
       return null;
@@ -68,15 +73,20 @@ export async function pollMatch(watch, { onCheckpoint, onSkip } = {}) {
     // здесь — сбой источника данных на конкретном опросе).
     watch.checkedCheckpoints.push(cp);
 
-    const verdict = evaluateAlert(stats);
+    const half = halfFor(cp);
+    const verdict = evaluateAlert(stats, half);
 
     // Счёт вышел за пределы списка "низких" — мониторинг матча прекращается
     // окончательно, без возврата, даже если счёт позже снова попадёт в
     // диапазон (см. Plan.md, 1.3: "например 1-0 → 2-0 → 2-1"). Срабатывает
     // только на реальном известном счёте (verdict.reason === 'score_not_low'),
     // не на сбоях чтения статистики (isError обрабатывается отдельно, матч
-    // остаётся watching, чтобы дать шанс следующей отметке).
-    if (verdict.reason === 'score_not_low') {
+    // остаётся watching, чтобы дать шанс следующей отметке). Только для
+    // отсечек 2-го тайма: список "низких" для 1-го тайма — строго {0-0}, и
+    // гол на 15'/25' (счёт 1-0/0-1) не должен блокировать матч — план прямо
+    // требует, чтобы отсечки 2-го тайма всё равно проверялись по своему
+    // (более широкому) списку счетов независимо от истории 1-го тайма.
+    if (half === 2 && verdict.reason === 'score_not_low') {
       watch.status = 'out_of_range';
     }
 
