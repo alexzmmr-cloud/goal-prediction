@@ -13,8 +13,28 @@ const FIRST_HALF_CHECKPOINTS = new Set([15, 25]);
 // а не засчитать с данными случайной поздней минуты.
 const FIRST_HALF_END = 45;
 
+// Сколько подряд идущих отметок с недоступной статистикой (isError) означают
+// "этот матч не покрыт data-провайдером Forebet, а не разовый сетевой
+// сбой" — наблюдение пользователя: некоторые матчи (обычно второстепенные
+// лиги) стабильно не отдают статистику ни на одной отметке. Держать такой
+// матч в мониторинге до конца дня бессмысленно.
+export const CONSECUTIVE_ERRORS_TO_EXCLUDE = 2;
+
 function halfFor(checkpoint) {
   return FIRST_HALF_CHECKPOINTS.has(checkpoint) ? 1 : 2;
+}
+
+// Обновляет счётчик ПОДРЯД идущих ошибок статистики и переводит watch в
+// excluded_no_data при достижении порога. Успешная проверка сбрасывает
+// счётчик — разовый сетевой сбой не должен исключить матч, который на деле
+// просто временно не ответил. Вынесена отдельно (не инлайн в pollMatch),
+// чтобы test-no-data.mjs мог проверять именно эту логику напрямую, а не
+// копию — иначе изменение здесь могло бы разойтись с тестом незаметно.
+export function applyErrorTracking(watch, isError) {
+  watch.consecutiveErrors = isError ? watch.consecutiveErrors + 1 : 0;
+  if (watch.consecutiveErrors >= CONSECUTIVE_ERRORS_TO_EXCLUDE) {
+    watch.status = 'excluded_no_data';
+  }
 }
 
 // Состояние одного отслеживаемого матча.
@@ -27,7 +47,8 @@ export function createMatchWatch(match) {
     kickoffText: match.kickoffText, // ориентир для mayHaveStarted() — не трогать матч раньше времени (см. sites/forebet-kickoff.mjs)
     checkedCheckpoints: [], // пройденные отметки (число минут)
     skippedCheckpoints: [], // отметки, которые нельзя было честно проверить (см. FIRST_HALF_END)
-    status: 'watching', // watching | done | out_of_range
+    consecutiveErrors: 0, // подряд идущие isError-отметки (см. CONSECUTIVE_ERRORS_TO_EXCLUDE)
+    status: 'watching', // watching | done | out_of_range | excluded_no_data
   };
 }
 
@@ -90,11 +111,14 @@ export async function pollMatch(watch, { onCheckpoint, onSkip } = {}) {
       watch.status = 'out_of_range';
     }
 
+    const isError = stats.status !== 'ok';
+    applyErrorTracking(watch, isError);
+
     const result = {
       checkpoint: cp,
       minute,
       stats,
-      isError: stats.status !== 'ok',
+      isError,
       verdict,
     };
     if (onCheckpoint) onCheckpoint(watch, result);

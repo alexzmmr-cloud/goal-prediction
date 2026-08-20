@@ -26,6 +26,11 @@ Forebet матчи с высоким ожидаемым тоталом голо�
   ручной калибровки порога.
 * Как только счёт матча выходит за пределы «низких» — матч больше не
   отслеживается.
+* Если статистика недоступна 2 отметки подряд (счётчик сбрасывается любой
+  успешной проверкой между ними) — матч исключается из дальнейшего
+  мониторинга: некоторые матчи (обычно второстепенные лиги) стабильно не
+  покрыты data-провайдером Forebet, держать их в списке до конца дня
+  бессмысленно.
 
 ## Стек и инструменты
 
@@ -118,8 +123,8 @@ node run.mjs
 * `node test-alert-rule.mjs`, `node test-scheduler.mjs <matchUrl> <matchId>`,
   `node test-alert-log.mjs`, `node test-telegram-format.mjs`,
   `node test-out-of-range.mjs`, `node test-scheduler-late-start.mjs
-  <matchUrl> <matchId>`, `node test-kickoff.mjs` — точечные проверки
-  отдельных модулей.
+  <matchUrl> <matchId>`, `node test-kickoff.mjs`, `node test-no-data.mjs` —
+  точечные проверки отдельных модулей.
 * `node --check <файл>.mjs` — проверка синтаксиса.
 
 ## Что важно знать при работе с проектом

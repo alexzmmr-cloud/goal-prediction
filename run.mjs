@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import { withStealthPage, withVisiblePage } from './browser-stealth.mjs';
 import { url as forebetTodayUrl, scrapeToday, filterByTotal } from './sites/forebet-today.mjs';
-import { createMatchWatch, pollMatch } from './scheduler.mjs';
+import { createMatchWatch, pollMatch, CONSECUTIVE_ERRORS_TO_EXCLUDE } from './scheduler.mjs';
 import { appendAlert } from './alert-log.mjs';
 import { createBot, sendAlert, sendStatus } from './telegram.mjs';
 import { mayHaveStarted } from './sites/forebet-kickoff.mjs';
@@ -72,6 +72,10 @@ async function main() {
       }).catch((err) => {
         console.log(`[FAIL] ${watch.homeTeam} - ${watch.awayTeam}: ${err.message}`);
       });
+
+      if (watch.status === 'excluded_no_data') {
+        console.log(`[${watch.homeTeam} - ${watch.awayTeam}] исключён: ${CONSECUTIVE_ERRORS_TO_EXCLUDE} отметки подряд без статистики (матч не покрыт data-провайдером Forebet)`);
+      }
 
       void result;
     }
