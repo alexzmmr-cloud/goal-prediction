@@ -19,6 +19,7 @@ export function createMatchWatch(match) {
     matchId: match.matchId,
     homeTeam: match.homeTeam,
     awayTeam: match.awayTeam,
+    kickoffText: match.kickoffText, // ориентир для mayHaveStarted() — не трогать матч раньше времени (см. sites/forebet-kickoff.mjs)
     checkedCheckpoints: [], // пройденные отметки (число минут)
     skippedCheckpoints: [], // отметки, которые нельзя было честно проверить (см. FIRST_HALF_END)
     status: 'watching', // watching | done | out_of_range

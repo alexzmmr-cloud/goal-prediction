@@ -22,6 +22,12 @@ export async function scrapeToday(page) {
       const home = row.querySelector('.homeTeam [itemprop="name"]')?.textContent?.trim();
       const away = row.querySelector('.awayTeam [itemprop="name"]')?.textContent?.trim();
       const dateAttr = row.querySelector('time[itemprop="startDate"]')?.getAttribute('datetime');
+      // datetime-атрибут даёт только дату (YYYY-MM-DD); видимый текст .date_bah
+      // содержит дату+время вида "20/08/2026 12:00" — это ориентир для
+      // планировщика (не дёргать матч раньше времени), не источник истины
+      // о ходе матча (им остаётся игровая минута со страницы самого матча,
+      // см. Plan.md, 1.3).
+      const kickoffText = row.querySelector('.date_bah')?.textContent?.trim() || null;
       const exactScore = row.querySelector('.ex_sc:not(.tabonly)')?.textContent?.trim()
         || row.querySelector('.scrmobpred')?.textContent?.replace(/\s+/g, '');
       const link = row.querySelector('a.tnmscn')?.href
@@ -33,6 +39,7 @@ export async function scrapeToday(page) {
         homeTeam: home,
         awayTeam: away,
         kickoffISO: dateAttr || null,
+        kickoffText,
         predictedScore: exactScore || null,
         matchUrl: link,
         matchId: extractMatchId(link),

@@ -4,6 +4,7 @@ import { url as forebetTodayUrl, scrapeToday, filterByTotal } from './sites/fore
 import { createMatchWatch, pollMatch } from './scheduler.mjs';
 import { appendAlert } from './alert-log.mjs';
 import { createBot, sendAlert } from './telegram.mjs';
+import { mayHaveStarted } from './sites/forebet-kickoff.mjs';
 
 const POLL_INTERVAL_MS = 60_000; // см. Plan.md, шаг 3: разумный интервал 1-2 минуты
 const MIN_TOTAL = 3;
@@ -39,6 +40,12 @@ async function main() {
   while (watches.some((w) => w.status === 'watching')) {
     for (const watch of watches) {
       if (watch.status !== 'watching') continue;
+
+      // Не открываем браузер для матчей, время кик-оффа которых ещё
+      // заведомо не подошло (см. sites/forebet-kickoff.mjs) — иначе при
+      // запуске утром на весь день скрипт впустую дёргал бы вечерние
+      // матчи каждую минуту по много часов подряд.
+      if (!mayHaveStarted(watch.kickoffText)) continue;
 
       const result = await pollMatch(watch, {
         onCheckpoint: async (w, r) => {
