@@ -1,8 +1,11 @@
-// Юнит-проверка (без сети) ветки out_of_range в scheduler.mjs — используем
-// прямой вызов evaluateAlert, чтобы подтвердить связку verdict.reason ->
-// status перехода, не полагаясь на реальный live-матч (счёт которого не
-// контролируем).
-import { evaluateAlert } from './alert-rule.mjs';
+// Юнит-проверка (без сети) правил evaluateGrowth/evaluateBaseline, от
+// которых зависит переход watch.status -> 'out_of_range' в scheduler.mjs
+// (см. pollMatch: `if (verdict.reason === 'score_not_low') watch.status = 'out_of_range'`).
+// Модель "матч целиком, не отдельная команда" не изменилась при переходе на
+// прирост ударов (см. Plan.md) — как только счёт перестаёт быть 0:0, любая
+// из функций правила возвращает reason='score_not_low' независимо от того,
+// на какой отсечке это произошло.
+import { evaluateBaseline, evaluateGrowth } from './alert-rule.mjs';
 
 let failed = 0;
 function check(name, condition) {
@@ -10,30 +13,21 @@ function check(name, condition) {
   if (!condition) failed++;
 }
 
-// 2-й тайм, счёт вне диапазона — scheduler.mjs переводит в out_of_range
-// (условие `half === 2 && verdict.reason === 'score_not_low'`).
-const secondHalfHighScore = evaluateAlert(
-  { status: 'ok', score: '2-1', home: { shotsOnGoal: 5 }, away: { shotsOnGoal: 1 } },
-  2,
-);
-check('2T, счёт 2-1 -> reason=score_not_low (должно перевести в out_of_range)', secondHalfHighScore.reason === 'score_not_low');
+const goalScored = { status: 'ok', score: '1-0', home: { shotsOnGoal: 5 }, away: { shotsOnGoal: 1 } };
 
-// 1-й тайм, гол уже забит (счёт 1-0) — НЕ должно переводить в out_of_range:
-// план требует, чтобы отсечки 2-го тайма всё равно проверялись по своему
-// списку счетов независимо от истории 1-го тайма (см. Plan.md, 1.3).
-// scheduler.mjs защищает это условием `half === 2` — сам по себе
-// verdict.reason тут тоже 'score_not_low', это ожидаемо и нормально:
-// именно scheduler.mjs (не evaluateAlert) обязан не реагировать на это
-// значение для half=1.
-const firstHalfGoalScored = evaluateAlert(
-  { status: 'ok', score: '1-0', home: { shotsOnGoal: 5 }, away: { shotsOnGoal: 0 } },
-  1,
+check(
+  'evaluateBaseline (10\'): счёт 1-0 -> reason=score_not_low (должно перевести в out_of_range)',
+  evaluateBaseline(goalScored).reason === 'score_not_low',
 );
-check('1T, счёт 1-0 -> reason=score_not_low (scheduler.mjs НЕ должен перевести в out_of_range для half=1)', firstHalfGoalScored.reason === 'score_not_low');
+check(
+  'evaluateGrowth (15/25/30/50/60/75): счёт 1-0 -> reason=score_not_low (должно перевести в out_of_range)',
+  evaluateGrowth(goalScored, { home: 1, away: 0 }).reason === 'score_not_low',
+);
 
 console.log('\nСама привязка reason -> status="out_of_range" находится в scheduler.mjs');
-console.log('(pollMatch, ветка `if (half === 2 && verdict.reason === "score_not_low")`) —');
-console.log('здесь подтверждены оба условия, от которых она зависит.');
+console.log('(pollMatch, ветка `if (verdict.reason === "score_not_low")`) — здесь');
+console.log('подтверждено, что обе функции правила единообразно возвращают это значение');
+console.log('как только счёт перестаёт быть 0:0, независимо от отсечки/тайма.');
 
 if (failed > 0) {
   console.log(`\n${failed} test(s) FAILED`);

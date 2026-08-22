@@ -1,11 +1,12 @@
-import { createMatchWatch, pollMatch, CHECKPOINTS } from './scheduler.mjs';
+import { createMatchWatch, pollMatch, FIRST_HALF_CHECKPOINTS, SECOND_HALF_CHECKPOINTS } from './scheduler.mjs';
 
 // Укороченный тестовый прогон (см. Plan.md, шаг 3, "Проверка"): подменяем
 // реальные контрольные точки на маленькие числа, чтобы не ждать 90 минут
 // реального матча — планировщик должен сработать почти сразу на текущей
 // минуте идущего матча.
-CHECKPOINTS.length = 0;
-CHECKPOINTS.push(1, 2, 3); // заведомо меньше текущей минуты любого live-матча
+FIRST_HALF_CHECKPOINTS.length = 0;
+FIRST_HALF_CHECKPOINTS.push(1, 2, 3); // заведомо меньше текущей минуты любого live-матча
+SECOND_HALF_CHECKPOINTS.length = 0;
 
 const url = process.argv[2];
 const matchId = process.argv[3];
@@ -23,7 +24,7 @@ const watch = createMatchWatch({
 
 console.log('Начальное состояние:', JSON.stringify(watch, null, 2));
 
-for (let i = 0; i < CHECKPOINTS.length + 1; i++) {
+for (let i = 0; i < FIRST_HALF_CHECKPOINTS.length + 1; i++) {
   const result = await pollMatch(watch, {
     onCheckpoint: (w, r) => console.log(`[CHECKPOINT ${r.checkpoint}'] минута=${r.minute}, isError=${r.isError}, verdict=`, JSON.stringify(r.verdict)),
   });

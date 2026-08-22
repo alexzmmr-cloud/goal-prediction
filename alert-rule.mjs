@@ -1,61 +1,86 @@
-// Правило алерта (см. Plan.md, 1.3 "Допущения" и 2.1 "Ключевое правило"):
-// - счёт на момент отсечки входит в список "низких" для этой половины матча;
-// - суммарные (с начала матча) удары в створ у ЛЮБОЙ команды > порога для этой половины.
-// Оба условия обязательны одновременно (порог сам по себе, без низкого счёта,
-// не даёт алерт — низкий счёт зафиксирован планом как обязательное условие входа).
-//
-// Порог и список "низких" счетов разные для 1-го и 2-го тайма (уточнено
-// пользователем после наблюдения за реальными матчами): в 1-м тайме порог
-// ниже, но счёт обязан быть строго 0:0 (более мягкое требование к ударам
-// компенсируется более строгим требованием к счёту); во 2-м тайме порог
-// выше — иначе за 50-80 минут игры 2+ удара в створ у команды не редкость
-// и не показатель скорого гола, а просто шум.
+// Правило алерта (переработано по запросу пользователя — см. Plan.md,
+// раздел про отказ от 2-го тайма с "низкими" счетами и переход на модель
+// "нарастания ударов"):
+// - счёт на момент отсечки должен быть строго 0:0 — как только гол забит,
+//   матч навсегда выпадает из мониторинга (см. scheduler.mjs);
+// - на первой отсечке (10') алерт даёт абсолютный порог FIRST_CHECKPOINT_SHOTS_THRESHOLD;
+// - на каждой следующей отсечке 1-го тайма (15/25/30) и всех отсечках 2-го
+//   тайма (50/60/75) алерт даёт ПРИРОСТ ударов в створ у любой команды
+//   относительно последней реально проверенной отсечки (не обязательно
+//   предыдущей по списку — если та была пропущена, база берётся с последней
+//   успешно проверенной), а не абсолютное число — плоский матч без развития
+//   не должен алертить повторно на одном и том же старом числе ударов;
+// - переход из 1-го тайма во 2-й отдельно завязан на удары к концу 1-го
+//   тайма (см. isReadyForSecondHalf) — обоснование порога см. README.md,
+//   справочная статистика (2.5-3.3 удара в створ на гол в среднем).
 
-export const FIRST_HALF_SHOTS_THRESHOLD = 2;
-export const SECOND_HALF_SHOTS_THRESHOLD = 4;
+export const FIRST_CHECKPOINT_SHOTS_THRESHOLD = 1;
+export const GROWTH_SHOTS_THRESHOLD = 1;
+export const SECOND_HALF_ENTRY_SHOTS_THRESHOLD = 3;
 
-const FIRST_HALF_LOW_SCORES = new Set(['0-0']);
-const SECOND_HALF_LOW_SCORES = new Set(['0-0', '0-1', '1-1', '1-0']);
-
-function lowScoresFor(half) {
-  return half === 1 ? FIRST_HALF_LOW_SCORES : SECOND_HALF_LOW_SCORES;
-}
-
-function thresholdFor(half) {
-  return half === 1 ? FIRST_HALF_SHOTS_THRESHOLD : SECOND_HALF_SHOTS_THRESHOLD;
-}
-
-export function isLowScore(score, half = 2) {
+function isScoreless(score) {
   if (!score) return false;
-  return lowScoresFor(half).has(score.replace(/\s+/g, ''));
+  return score.replace(/\s+/g, '') === '0-0';
 }
 
-// stats — результат readLiveStats() из sites/forebet-live.mjs (status: 'ok' | 'no_data' | ...).
-// half — 1 (отсечки 15'/25') или 2 (отсечки 50'/60'/70'/80'), определяет
-// порог по ударам и допустимый список счетов (см. комментарий выше).
-export function evaluateAlert(stats, half = 2) {
+// Базовая проверка на первой отсечке (10') — нет предыдущей точки для
+// сравнения, поэтому единственный критерий — абсолютный порог.
+export function evaluateBaseline(stats) {
   if (!stats || stats.status !== 'ok') {
     return { alert: false, reason: `stats_${stats?.status || 'missing'}` };
   }
 
-  if (!isLowScore(stats.score, half)) {
+  if (!isScoreless(stats.score)) {
     return { alert: false, reason: 'score_not_low', score: stats.score };
   }
 
-  const threshold = thresholdFor(half);
   const homeShots = stats.home?.shotsOnGoal ?? 0;
   const awayShots = stats.away?.shotsOnGoal ?? 0;
-  const triggered = homeShots > threshold || awayShots > threshold;
+  const triggered = homeShots >= FIRST_CHECKPOINT_SHOTS_THRESHOLD || awayShots >= FIRST_CHECKPOINT_SHOTS_THRESHOLD;
 
   if (!triggered) {
     return { alert: false, reason: 'shots_below_threshold', homeShots, awayShots };
   }
 
-  return {
-    alert: true,
-    reason: 'triggered',
-    score: stats.score,
-    homeShots,
-    awayShots,
-  };
+  return { alert: true, reason: 'triggered', score: stats.score, homeShots, awayShots };
+}
+
+// Все отсечки после первой — алерт даёт прирост ударов у любой команды
+// относительно последней проверенной отсечки (lastShots), не абсолютное
+// число. lastShots — { home, away } с той отсечки, где в последний раз
+// реально была прочитана статистика (см. scheduler.mjs, watch.lastShots).
+export function evaluateGrowth(stats, lastShots) {
+  if (!stats || stats.status !== 'ok') {
+    return { alert: false, reason: `stats_${stats?.status || 'missing'}` };
+  }
+
+  if (!isScoreless(stats.score)) {
+    return { alert: false, reason: 'score_not_low', score: stats.score };
+  }
+
+  const homeShots = stats.home?.shotsOnGoal ?? 0;
+  const awayShots = stats.away?.shotsOnGoal ?? 0;
+  const prevHome = lastShots?.home ?? 0;
+  const prevAway = lastShots?.away ?? 0;
+  const triggered =
+    homeShots - prevHome >= GROWTH_SHOTS_THRESHOLD || awayShots - prevAway >= GROWTH_SHOTS_THRESHOLD;
+
+  if (!triggered) {
+    return { alert: false, reason: 'no_growth', homeShots, awayShots, prevHome, prevAway };
+  }
+
+  return { alert: true, reason: 'triggered', score: stats.score, homeShots, awayShots };
+}
+
+// Условие продолжения мониторинга во 2-м тайме, проверяется на последней
+// отсечке 1-го тайма (30'): счёт всё ещё 0:0 и удары у любой команды выше
+// SECOND_HALF_ENTRY_SHOTS_THRESHOLD — абсолютный порог, не прирост (см.
+// README.md — статистически команда уже близка к среднему числу ударов на
+// гол, независимо от того, была пауза перед этим или нет).
+export function isReadyForSecondHalf(stats) {
+  if (!stats || stats.status !== 'ok') return false;
+  if (!isScoreless(stats.score)) return false;
+  const homeShots = stats.home?.shotsOnGoal ?? 0;
+  const awayShots = stats.away?.shotsOnGoal ?? 0;
+  return homeShots > SECOND_HALF_ENTRY_SHOTS_THRESHOLD || awayShots > SECOND_HALF_ENTRY_SHOTS_THRESHOLD;
 }

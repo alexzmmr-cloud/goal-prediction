@@ -1,11 +1,16 @@
 import { withPage } from './browser.mjs';
 import { readCurrentMinute, readLiveStats } from './sites/forebet-live.mjs';
-import { evaluateAlert } from './alert-rule.mjs';
+import { evaluateBaseline, evaluateGrowth, isReadyForSecondHalf } from './alert-rule.mjs';
 
-// Контрольные точки: 15'/25' — 1-й тайм (только при счёте 0:0, см. Plan.md, 1.1/1.3
-// и уточнение порогов в alert-rule.mjs), 50/60/70/80' — 2-й тайм.
-export const CHECKPOINTS = [15, 25, 50, 60, 70, 80];
-const FIRST_HALF_CHECKPOINTS = new Set([15, 25]);
+// Контрольные точки (переработано по запросу пользователя — см. Plan.md):
+// 10'/15'/25'/30' — 1-й тайм, проверяются всегда. 50'/60'/75' — 2-й тайм,
+// проверяются ТОЛЬКО если матч прошёл isReadyForSecondHalf на отсечке 30'
+// (см. pollMatch) — иначе матч останавливается после 30' и во 2-й тайм не
+// переходит вовсе (не просто "пропускает отсечки", а status='done').
+export const FIRST_HALF_CHECKPOINTS = [10, 15, 25, 30];
+export const SECOND_HALF_CHECKPOINTS = [50, 60, 75];
+const FIRST_HALF_CHECKPOINTS_SET = new Set(FIRST_HALF_CHECKPOINTS);
+const LAST_FIRST_HALF_CHECKPOINT = FIRST_HALF_CHECKPOINTS[FIRST_HALF_CHECKPOINTS.length - 1];
 
 // Отсечки 1-го тайма валидны только пока реально идёт 1-й тайм — если
 // планировщик впервые опрашивает матч уже позже (например, процесс был
@@ -19,10 +24,6 @@ const FIRST_HALF_END = 45;
 // лиги) стабильно не отдают статистику ни на одной отметке. Держать такой
 // матч в мониторинге до конца дня бессмысленно.
 export const CONSECUTIVE_ERRORS_TO_EXCLUDE = 2;
-
-function halfFor(checkpoint) {
-  return FIRST_HALF_CHECKPOINTS.has(checkpoint) ? 1 : 2;
-}
 
 // Обновляет счётчик ПОДРЯД идущих ошибок статистики и переводит watch в
 // excluded_no_data при достижении порога. Успешная проверка сбрасывает
@@ -48,12 +49,18 @@ export function createMatchWatch(match) {
     checkedCheckpoints: [], // пройденные отметки (число минут)
     skippedCheckpoints: [], // отметки, которые нельзя было честно проверить (см. FIRST_HALF_END)
     consecutiveErrors: 0, // подряд идущие isError-отметки (см. CONSECUTIVE_ERRORS_TO_EXCLUDE)
+    lastShots: null, // { home, away } с последней успешно проверенной отсечки — база для evaluateGrowth
+    playSecondHalf: false, // выставляется на 30' через isReadyForSecondHalf — определяет, войдут ли в очередь отметки 50/60/75
     status: 'watching', // watching | done | out_of_range | excluded_no_data
   };
 }
 
+function activeCheckpoints(watch) {
+  return watch.playSecondHalf ? [...FIRST_HALF_CHECKPOINTS, ...SECOND_HALF_CHECKPOINTS] : FIRST_HALF_CHECKPOINTS;
+}
+
 function nextCheckpoint(watch) {
-  return CHECKPOINTS.find(
+  return activeCheckpoints(watch).find(
     (cp) => !watch.checkedCheckpoints.includes(cp) && !watch.skippedCheckpoints.includes(cp),
   );
 }
@@ -75,7 +82,7 @@ export async function pollMatch(watch, { onCheckpoint, onSkip } = {}) {
     if (minute === null) return null;
     if (minute < cp) return null; // отметка ещё не наступила
 
-    if (FIRST_HALF_CHECKPOINTS.has(cp) && minute > FIRST_HALF_END) {
+    if (FIRST_HALF_CHECKPOINTS_SET.has(cp) && minute > FIRST_HALF_END) {
       // 1-й тайм уже точно закончился — эту отметку нельзя честно проверить.
       watch.skippedCheckpoints.push(cp);
       if (onSkip) onSkip(watch, { checkpoint: cp, minute });
@@ -90,25 +97,32 @@ export async function pollMatch(watch, { onCheckpoint, onSkip } = {}) {
     // Отметка считается пройденной независимо от успеха чтения статистики
     // (см. Plan.md, шаг 4: недоступность Forebet на отсечке не должна
     // прерывать мониторинг следующих отсечек) — это отдельный смысл от
-    // skippedCheckpoints выше (там причина архитектурная — тайминг 15',
-    // здесь — сбой источника данных на конкретном опросе).
+    // skippedCheckpoints выше (там причина архитектурная — тайминг, здесь —
+    // сбой источника данных на конкретном опросе).
     watch.checkedCheckpoints.push(cp);
 
-    const half = halfFor(cp);
-    const verdict = evaluateAlert(stats, half);
+    // Первая отсечка (10') — абсолютный порог, нет предыдущей точки для
+    // сравнения. Все остальные — прирост относительно watch.lastShots.
+    const verdict = watch.lastShots === null ? evaluateBaseline(stats) : evaluateGrowth(stats, watch.lastShots);
 
-    // Счёт вышел за пределы списка "низких" — мониторинг матча прекращается
-    // окончательно, без возврата, даже если счёт позже снова попадёт в
-    // диапазон (см. Plan.md, 1.3: "например 1-0 → 2-0 → 2-1"). Срабатывает
-    // только на реальном известном счёте (verdict.reason === 'score_not_low'),
-    // не на сбоях чтения статистики (isError обрабатывается отдельно, матч
-    // остаётся watching, чтобы дать шанс следующей отметке). Только для
-    // отсечек 2-го тайма: список "низких" для 1-го тайма — строго {0-0}, и
-    // гол на 15'/25' (счёт 1-0/0-1) не должен блокировать матч — план прямо
-    // требует, чтобы отсечки 2-го тайма всё равно проверялись по своему
-    // (более широкому) списку счетов независимо от истории 1-го тайма.
-    if (half === 2 && verdict.reason === 'score_not_low') {
+    // Счёт перестал быть 0:0 — мониторинг матча прекращается окончательно,
+    // без возврата, даже если счёт позже перестанет расти (см. Plan.md:
+    // пользователь явно попросил убрать отдельную ветку 2-го тайма с
+    // "низкими" счетами — теперь единственный допустимый счёт всегда 0:0,
+    // единица мониторинга всегда матч целиком).
+    if (verdict.reason === 'score_not_low') {
       watch.status = 'out_of_range';
+    } else if (stats.status === 'ok') {
+      // Запоминаем удары ТОЛЬКО при успешном чтении статистики — сбой
+      // источника не должен обнулять базу сравнения для следующей отсечки.
+      watch.lastShots = { home: stats.home?.shotsOnGoal ?? 0, away: stats.away?.shotsOnGoal ?? 0 };
+    }
+
+    // На последней отсечке 1-го тайма (30') отдельно решаем, продолжать ли
+    // во 2-й тайм — критерий (удары к концу тайма выше порога) не совпадает
+    // с verdict.alert выше (там это прирост, здесь — абсолютное значение).
+    if (cp === LAST_FIRST_HALF_CHECKPOINT && watch.status === 'watching') {
+      watch.playSecondHalf = isReadyForSecondHalf(stats);
     }
 
     const isError = stats.status !== 'ok';

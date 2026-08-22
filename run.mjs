@@ -1,13 +1,12 @@
 import 'dotenv/config';
 import { withStealthPage, withVisiblePage } from './browser-stealth.mjs';
-import { url as forebetTodayUrl, scrapeToday, filterByTotal } from './sites/forebet-today.mjs';
+import { url as forebetTodayUrl, scrapeToday } from './sites/forebet-today.mjs';
 import { createMatchWatch, pollMatch, CONSECUTIVE_ERRORS_TO_EXCLUDE } from './scheduler.mjs';
 import { appendAlert } from './alert-log.mjs';
 import { createBot, sendAlert, sendStatus } from './telegram.mjs';
 import { mayHaveStarted } from './sites/forebet-kickoff.mjs';
 
 const POLL_INTERVAL_MS = 60_000; // см. Plan.md, шаг 3: разумный интервал 1-2 минуты
-const MIN_TOTAL = 3;
 
 async function scrapeTodayWithRetries(maxAttempts = 3) {
   let best = [];
@@ -32,12 +31,11 @@ async function main() {
 
   console.log('Получаю дневной список матчей Forebet...');
   const all = await scrapeTodayWithRetries();
-  const filtered = filterByTotal(all, MIN_TOTAL);
-  console.log(`Матчей всего: ${all.length}, с тоталом >= ${MIN_TOTAL}: ${filtered.length}`);
+  console.log(`Матчей всего: ${all.length}`);
 
-  await sendStatus(bot, chatId, `▶️ Мониторинг запущен: ${filtered.length} матчей с тоталом >= ${MIN_TOTAL}.`);
+  await sendStatus(bot, chatId, `▶️ Мониторинг запущен: ${all.length} матчей.`);
 
-  const watches = filtered.map(createMatchWatch);
+  const watches = all.map(createMatchWatch);
 
   while (watches.some((w) => w.status === 'watching')) {
     for (const watch of watches) {
@@ -52,7 +50,12 @@ async function main() {
       const result = await pollMatch(watch, {
         onCheckpoint: async (w, r) => {
           console.log(`[${w.homeTeam} - ${w.awayTeam}] отметка ${r.checkpoint}', минута ${r.minute}, verdict=${r.verdict.reason}`);
-          if (r.verdict.alert) {
+          // Отсечка 10' — только тихая база для сравнения на 15' (см.
+          // scheduler.mjs, watch.lastShots), в Telegram не шлётся: почти
+          // любая команда делает хотя бы 1 удар к 10-й минуте, реального
+          // сигнала в этом ещё нет (по решению пользователя после того как
+          // Telegram завалило сообщениями на этой отсечке).
+          if (r.verdict.alert && r.checkpoint !== 10) {
             const alertData = {
               matchId: w.matchId,
               homeTeam: w.homeTeam,

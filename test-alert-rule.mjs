@@ -1,44 +1,82 @@
 import {
-  evaluateAlert,
-  isLowScore,
-  FIRST_HALF_SHOTS_THRESHOLD,
-  SECOND_HALF_SHOTS_THRESHOLD,
+  evaluateBaseline,
+  evaluateGrowth,
+  isReadyForSecondHalf,
+  FIRST_CHECKPOINT_SHOTS_THRESHOLD,
+  GROWTH_SHOTS_THRESHOLD,
+  SECOND_HALF_ENTRY_SHOTS_THRESHOLD,
 } from './alert-rule.mjs';
 
-const cases = [
-  // 1-й тайм: список "низких" строго {0-0}, порог FIRST_HALF_SHOTS_THRESHOLD (2)
-  { name: '1T: 0-0 + порог пробит (хозяева)', half: 1, stats: { status: 'ok', score: '0-0', home: { shotsOnGoal: 3 }, away: { shotsOnGoal: 0 } }, expectAlert: true },
-  { name: '1T: 0-0, порог НЕ пробит (ровно 2)', half: 1, stats: { status: 'ok', score: '0-0', home: { shotsOnGoal: 2 }, away: { shotsOnGoal: 2 } }, expectAlert: false },
-  { name: '1T: счёт 1-0 — вне диапазона (для 1-го тайма это уже не "низкий")', half: 1, stats: { status: 'ok', score: '1-0', home: { shotsOnGoal: 5 }, away: { shotsOnGoal: 0 } }, expectAlert: false },
-
-  // 2-й тайм: список "низких" {0-0,0-1,1-1,1-0}, порог SECOND_HALF_SHOTS_THRESHOLD (4)
-  { name: '2T: 1-0 + порог пробит (хозяева, 5>4)', half: 2, stats: { status: 'ok', score: '1-0', home: { shotsOnGoal: 5 }, away: { shotsOnGoal: 0 } }, expectAlert: true },
-  { name: '2T: 0-1, порог НЕ пробит (ровно 4)', half: 2, stats: { status: 'ok', score: '0-1', home: { shotsOnGoal: 4 }, away: { shotsOnGoal: 0 } }, expectAlert: false },
-  { name: '2T: 0-0, порог НЕ пробит (3, было бы достаточно в 1-м тайме)', half: 2, stats: { status: 'ok', score: '0-0', home: { shotsOnGoal: 3 }, away: { shotsOnGoal: 0 } }, expectAlert: false },
-  { name: '2T: счёт вне диапазона (2-1), порог пробит', half: 2, stats: { status: 'ok', score: '2-1', home: { shotsOnGoal: 5 }, away: { shotsOnGoal: 0 } }, expectAlert: false },
-
-  // Сбои источника — не зависят от half
-  { name: 'недоступность Forebet (error)', half: 2, stats: { status: 'no_stats_response' }, expectAlert: false },
-  { name: 'нет данных от провайдера', half: 2, stats: { status: 'no_data' }, expectAlert: false },
-];
-
 let failed = 0;
-for (const c of cases) {
-  const result = evaluateAlert(c.stats, c.half);
-  const ok = result.alert === c.expectAlert;
-  console.log(`${ok ? 'OK  ' : 'FAIL'} ${c.name} -> alert=${result.alert} (reason=${result.reason})`);
-  if (!ok) failed++;
+function check(name, condition) {
+  console.log(`${condition ? 'OK  ' : 'FAIL'} ${name}`);
+  if (!condition) failed++;
 }
 
+console.log('evaluateBaseline (10\', абсолютный порог):');
+check(
+  'порог пробит (хозяева, 1 удар)',
+  evaluateBaseline({ status: 'ok', score: '0-0', home: { shotsOnGoal: 1 }, away: { shotsOnGoal: 0 } }).alert === true,
+);
+check(
+  'порог НЕ пробит (0 ударов у обеих)',
+  evaluateBaseline({ status: 'ok', score: '0-0', home: { shotsOnGoal: 0 }, away: { shotsOnGoal: 0 } }).alert === false,
+);
+check(
+  'счёт 1-0 — вне диапазона',
+  evaluateBaseline({ status: 'ok', score: '1-0', home: { shotsOnGoal: 5 }, away: { shotsOnGoal: 0 } }).reason === 'score_not_low',
+);
+check(
+  'недоступность Forebet',
+  evaluateBaseline({ status: 'no_stats_response' }).alert === false,
+);
+
 console.log('---');
-console.log('isLowScore tests:');
-console.log('half=1, 0-0 ->', isLowScore('0-0', 1), '(expect true)');
-console.log('half=1, 1-0 ->', isLowScore('1-0', 1), '(expect false — 1-й тайм только 0:0)');
-console.log('half=2, 1-0 ->', isLowScore('1-0', 2), '(expect true)');
-console.log('half=2, 2-0 ->', isLowScore('2-0', 2), '(expect false)');
-console.log('null ->', isLowScore(null), '(expect false)');
-console.log('FIRST_HALF_SHOTS_THRESHOLD =', FIRST_HALF_SHOTS_THRESHOLD);
-console.log('SECOND_HALF_SHOTS_THRESHOLD =', SECOND_HALF_SHOTS_THRESHOLD);
+console.log('evaluateGrowth (15/25/30/50/60/75, прирост от последней отсечки):');
+check(
+  'прирост есть (было 1, стало 2 у хозяев)',
+  evaluateGrowth({ status: 'ok', score: '0-0', home: { shotsOnGoal: 2 }, away: { shotsOnGoal: 0 } }, { home: 1, away: 0 }).alert === true,
+);
+check(
+  'прироста нет (то же число, что и раньше)',
+  evaluateGrowth({ status: 'ok', score: '0-0', home: { shotsOnGoal: 1 }, away: { shotsOnGoal: 0 } }, { home: 1, away: 0 }).reason === 'no_growth',
+);
+check(
+  'прирост у гостей засчитывается тоже (OR по командам)',
+  evaluateGrowth({ status: 'ok', score: '0-0', home: { shotsOnGoal: 1 }, away: { shotsOnGoal: 3 } }, { home: 1, away: 2 }).alert === true,
+);
+check(
+  'счёт вышел из 0:0 — no alert, reason=score_not_low',
+  evaluateGrowth({ status: 'ok', score: '1-0', home: { shotsOnGoal: 5 }, away: { shotsOnGoal: 0 } }, { home: 1, away: 0 }).reason === 'score_not_low',
+);
+check(
+  'нет базы (lastShots не передан) — считается от 0, любой удар это прирост',
+  evaluateGrowth({ status: 'ok', score: '0-0', home: { shotsOnGoal: 1 }, away: { shotsOnGoal: 0 } }, null).alert === true,
+);
+
+console.log('---');
+console.log('isReadyForSecondHalf (30\', абсолютный порог для входа во 2-й тайм):');
+check(
+  'порог пробит (хозяева, 4 > 3)',
+  isReadyForSecondHalf({ status: 'ok', score: '0-0', home: { shotsOnGoal: 4 }, away: { shotsOnGoal: 0 } }) === true,
+);
+check(
+  'порог НЕ пробит (ровно 3, строго больше нужно)',
+  isReadyForSecondHalf({ status: 'ok', score: '0-0', home: { shotsOnGoal: 3 }, away: { shotsOnGoal: 3 } }) === false,
+);
+check(
+  'счёт не 0:0 — false независимо от ударов',
+  isReadyForSecondHalf({ status: 'ok', score: '1-0', home: { shotsOnGoal: 10 }, away: { shotsOnGoal: 0 } }) === false,
+);
+check(
+  'нет данных — false',
+  isReadyForSecondHalf({ status: 'no_data' }) === false,
+);
+
+console.log('---');
+console.log('FIRST_CHECKPOINT_SHOTS_THRESHOLD =', FIRST_CHECKPOINT_SHOTS_THRESHOLD);
+console.log('GROWTH_SHOTS_THRESHOLD =', GROWTH_SHOTS_THRESHOLD);
+console.log('SECOND_HALF_ENTRY_SHOTS_THRESHOLD =', SECOND_HALF_ENTRY_SHOTS_THRESHOLD);
 
 if (failed > 0) {
   console.log(`\n${failed} test(s) FAILED`);
